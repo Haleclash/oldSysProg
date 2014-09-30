@@ -1,0 +1,379 @@
+/*
+   PROGRAM: BASE TO BOMBARDIERS (LAB7)
+   AUTHOR:  C.D.B.
+   DATE:    04/27/2014
+   COURSE:  E C E 2220
+   PURPOSE: Checks that four terminals are open.  Creates four threads: a base
+            and three bombers.  The base accepts user input and signals from
+            the bombers.  The bombers track fuel, payload, and distance from
+            base using separate calculations.  This data is printed to the
+            terminal every three seconds.  The goal of the user is to complete
+            the bombing runs and get our pilots home safely.  Demonstrates
+            knowledge of fork, getpid, wait, signal, alarm, kill, and windows.
+
+   KNOWN BUGS
+            Base will not salute all bombers in event of simultaneous failure.
+*/
+
+// define initial values
+#define FUEL 50;  // gallons
+#define BOMB  6;  // units
+#define DIST  0;  // miles
+
+// libraries and header files
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <signal.h>
+#include <sys/wait.h>
+
+// other definitions
+typedef void (*fptr) ();               /* function pointer definition     */
+FILE *terminal[4] = {0, 0, 0, 0};      /* file pointer to each terminal   */
+int  process[4];                       /* pid of parent and each child    */
+int  bomberNumber;                     /* index of process (1, 2, or 3)   */
+int  bfuel;                            /* remaining fuel of process       */
+int  bbomb;                            /* remaining ordnance of process   */
+int  bdist;                            /* distance from base of process   */
+int  toTarget;                         /* true/false directional index    */
+int  count = 0;                        /* count of grounded planes        */
+
+// function prototypes
+int  findTerminals(FILE *terminal[4], char termPath[4][12]);
+void closeTerminals(FILE *terminal[4]);
+void alarmHandler(int signum);
+void bombHandler(int signum);
+void fuelHandler_plane(int signum);
+void fuelHandler_base(int signum);
+
+// function main
+int main(void)
+{
+   // declare variables
+   char termPath[4][12];               /* directory path of terminals     */
+   int  currentProcess;                /* pid of current process          */
+   int  checkReturn;                   /* checks that terminals opened    */
+   int  childNumber;                   /* number of child (1, 2, or 3)    */
+   char cmd[128];                      /* user input to base (max 1 KB)   */
+   int  i;                             /* indexing variable               */
+
+   // attempt to open streams to four terminals
+   checkReturn = findTerminals(terminal, termPath);
+
+   // terminate program if terminals were not found
+   if (checkReturn == -1)
+   {
+      printf("\nCould not find four terminals.  Program terminated.\n\n");
+      return 1;
+   }
+
+   // get PID of parent
+   process[0] = getpid();
+
+   // create first bomber
+   process[1] = fork();
+   if (process[1] == 0)
+      process[1] = getpid();
+
+   // create second bomber
+   else
+   {
+      process[2] = fork();
+      if (process[2] == 0)
+         process[2] = getpid();
+
+      // create third bomber
+      else
+      {
+         process[3] = fork();
+         if (process[3] == 0)
+            process[3] = getpid();
+      }
+   }
+
+   /* The process array of the parent now contains its own PID as well as
+      the PID of each successive child.  The process array of each child
+      contains the PID of the parent, each child before it, and itself.   */
+
+   // establish PID of thread
+   currentProcess = getpid();
+
+   // establish child number
+   for (i = 1; i < 4; i++)
+      if (currentProcess == process[i])
+         childNumber = i;
+
+   // set bomber number, initial conditions, and direction
+   bomberNumber = childNumber;
+   bfuel = FUEL;
+   bbomb = BOMB;
+   bdist = DIST;
+   toTarget = 1;
+
+   // execute base instructions
+   if (currentProcess == process[0])
+   {
+      // install signal handlers
+      signal(SIGUSR2, (fptr)fuelHandler_base);
+
+      while (cmd[0] != 'q')
+      {
+         // accept user input
+         scanf("%s", cmd);
+
+         // check and execute bombing command
+         if (cmd[0] == 'b')
+         {
+            if (cmd[1] < '1' || cmd[1] > '3' || cmd[2] != '\0')
+               printf("Invalid command. Enter bn (n = 1, 2, 3) to bomb.\n");
+            else
+            {
+               /* EXECUTE BOMBING COMMAND */
+               i = (int) (cmd[1] - 0x30);
+               kill(process[i], SIGUSR1);
+            }
+         }
+
+         // check and execute refuel command
+         else if (cmd[0] == 'r')
+         {
+            if (cmd[1] < '1' || cmd[1] > '3' || cmd[2] != '\0')
+               printf("Invalid command. Enter rn (n = 1, 2, 3) to refuel.\n");
+            else
+            {
+               /* EXECUTE REFUEL COMMAND */
+               i = (int) (cmd[1] - 0x30);
+               kill(process[i], SIGUSR2);
+            }
+         }
+
+         // check and execute kill command
+         else if (cmd[0] == 'k')
+         {
+            if (cmd[1] < '1' || cmd[1] > '3' || cmd[2] != '\0')
+               printf("Invalid command. Enter kn (n = 1, 2, 3) to kill.\n");
+            else
+            {
+               /* EXECUTE KILL COMMAND */
+               i = (int) (cmd[1] - 0x30);
+               kill(process[i], SIGTERM);
+               printf("Bomber %d terminated.\n", i);
+               kill(process[0], SIGUSR2);
+            }
+         }
+
+         // check and execute quit command
+         else if (cmd[0] == 'q')
+         {
+               /* EXECUTE QUIT COMMAND */
+               kill(process[1], SIGTERM);
+               kill(process[2], SIGTERM);
+               kill(process[3], SIGTERM);
+               printf("Program terminated.\n");
+         }
+
+         // reject invalid commands
+         else
+         {
+            printf("Invalid command.  Enter bn to bomb, rn to refuel,");
+            printf("\nkn to kill, or q to quit.  (n = 1, 2, 3)\n");
+         }
+     }
+   }
+
+   // execute bomber instructions
+   else
+   {
+      // redirect output to corresponding terminal
+      freopen(termPath[childNumber], "w", stdout);
+
+      // install signal handlers
+      signal(SIGUSR1, (fptr)bombHandler);
+      signal(SIGUSR2, (fptr)fuelHandler_plane);
+
+      // install alarm handler
+      signal(SIGALRM, (fptr)alarmHandler);
+      alarm(1);
+
+      while (1)
+         sleep (1);
+   }
+
+   // close terminals
+   closeTerminals(terminal);
+
+   // return normally
+   return 0;
+}
+
+/* FUNCTION:   findTerminals
+   PARAMETERS: an array of four file pointers and an array of four strings
+   PURPOSE:    Attempts to open read-only streams to four terminals and
+               saves the name of each path. Returns -1 if not successful.
+*/
+int findTerminals(FILE *terminal[4], char termPath[4][12])
+{
+   // declare variables
+   char strDev[12];                    /* directory path of test terminal */
+   int  index = 0;                     /* indexing variable for good read */
+   int  i;                             /* indexing variable               */
+
+   // attempt to open streams to four terminals
+   for (i = 0; i < 100 && index < 4; i++)
+   {
+      sprintf(strDev, "/dev/pts/%d", i);
+      terminal[index] = fopen(strDev, "r");
+      if (terminal[index] != NULL)
+      {
+         sprintf(termPath[index], "/dev/pts/%d", i);
+         index++;
+      }
+   }
+
+   // return -1 if not successful, else return normally
+   if (index < 4)
+      i = -1;
+   else
+      i = 0;
+
+   return i;
+}
+
+/* FUNCTION:   closeTerminals
+   PARAMETERS: an array of four file pointers
+   PURPOSE:    Closes stream to each terminal.
+*/
+void closeTerminals(FILE *terminal[4])
+{
+   // declare variables
+   int i;                              /* indexing variable               */
+
+   // close stream to each terminal
+   for (i = 0; i < 4; i++)
+      fclose(terminal[i]);
+}
+
+/* FUNCTION:   alarmHandler
+   PARAMETERS: an integer signal number
+   PURPOSE:    Handles fuel, bombs, and distance adjustment.  Checks initial
+               and exit conditions.  Operates once per second.
+*/
+void alarmHandler(int signum)
+{
+   // declare variables
+   static int track = 0;               /* bomber seconds since launch     */
+   int mission = 0;                    /* bomber exit status              */
+
+   // decrement fuel by two gallons each second
+   if (track != 0)
+      bfuel -= 2;
+
+   // increment distance by one mile every two seconds toward target
+   if (track != 0 && track % 2 == 0)
+   {
+      if (toTarget == 1)
+         bdist += 1;
+
+      // else decrement distance by one mile every two seconds toward base
+      else
+         bdist -= 1;
+   }
+
+   // curb value of distance
+   if (bdist < 0)
+      bdist = 0;
+
+   // report fuel, ordnance, and distance from base every three seconds
+   if (track % 3 == 0)
+   {
+      printf("\nBomber %d to base. %d gallons left, ", bomberNumber, bfuel);
+      printf("%d bombs left, %d miles from base.", bbomb, bdist);
+   }
+
+   // check mission success
+   if (track > 1 && bdist == 0)
+      mission = 1;
+
+   // increment track
+   track++;
+
+   // set alarm
+   if (mission == 0)
+      alarm(1);
+
+   // check fuel tank status
+   if (bfuel < 5 && mission == 0)
+      printf("\nMayday, mayday!");
+   if (bfuel <= 0 && mission == 0)
+   {
+      kill(process[0], SIGUSR2);
+      printf("\nBomber %d down. Pick us up in the drink.", bomberNumber);
+      mission = -1;
+      sleep(1);
+   }
+
+   // check exit status
+   if (mission == 1)
+   {
+      printf("\nBomber %d reporting mission success.", bomberNumber);
+      exit(0);
+   }
+   if (mission == -1)
+   {
+      printf("\nBomber %d reporting mission failure.", bomberNumber);
+      exit(bomberNumber);
+   }
+}
+
+/* FUNCTION:   bombHandler
+   PARAMETERS: an integer signal number
+   PURPOSE:    Handles bomb deployment and related communications.
+*/
+void bombHandler(int signum)
+{
+   // decrement bomb count
+   if (bbomb > 0)
+      bbomb -= 1;
+
+   // report ordnance
+   printf("\nBomber %d to base. Bomb has been dropped.", bomberNumber);
+   if (bbomb > 0)
+      printf("\n%d ordnance remaining.", bbomb);
+   else
+   {
+      printf("\nPayload delivered. Returning to base.");
+      toTarget = 0;
+   }
+}
+
+/* FUNCTION:   fuelHandler_plane
+   PARAMETERS: an integer signal number
+   PURPOSE:    Handles the refueling signal from base to plane.
+*/
+void fuelHandler_plane(int signum)
+{
+   // reset tank to full
+   bfuel = FUEL;
+   printf("\nBomber %d to base. Refueled.", bomberNumber);
+}
+
+/* FUNCTION:   fuelHandler_base
+   PARAMETERS: an integer signal number
+   PURPOSE:    Handles the refueling signal from plane to base.
+*/
+void fuelHandler_base(int signum)
+{
+   // declare variables
+   int status = 0;                     /* status argument of wait         */
+
+   // determine which process sent signal
+   while (status == 0 && count < 3)
+   {
+      wait(&status);
+      count++;
+   }
+
+   // respond to downed plane
+   if (WEXITSTATUS(status) > 0)
+      printf("Vaya Con Dios, Flight %d\n", WEXITSTATUS(status));
+}
